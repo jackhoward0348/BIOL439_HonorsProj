@@ -1,0 +1,321 @@
+---
+title: "BIOL439 Howard Honors Project"
+author: "John Howard"
+output: html_notebook
+---
+
+# Package Loading
+```{r, results = 'hide'}
+####Loading Packages
+library(dbplyr)
+library(MethylIT)
+library(MethylIT.utils)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(reshape2)
+library(biomaRt)
+library(scales)
+library(rvest)
+library(stringr)
+```
+
+# Importing the Reference Arabidopsis Genome
+```{r, results = 'hide'}
+####Importing Genome
+AG <-data.table::fread("https://www.arabidopsis.org/download_files/Genes/TAIR10_genome_release/TAIR10_gff3/TAIR10_GFF3_genes.gff")
+#AG means arabidopsis genome
+#araport11 is updated version of TAIR10
+#gtf files are g ranges with metadata
+
+AG <- AG[ ,c(1,3,4,5,9)]
+colnames(AG) <- c("chromosome", "type", "start", "end", "metadata")
+
+AT_genes <-
+  AG %>%
+  filter(type == 'gene')
+#filtering for type == 'gene', getting rid of mRNA, exons, CDS, mitochondrial DNA 
+
+AT_genes <- separate(AT_genes, metadata, c("gene_id", "biotype", "name"), ";")
+AT_genes$gene_id <- gsub(pattern = ".*=", replacement = "", AT_genes$gene_id)
+AT_genes$biotype <- gsub(pattern = ".*=", replacement = "", AT_genes$biotype)
+AT_genes$name <- gsub(pattern = ".*=", replacement = "", AT_genes$name)
+#regex used to separate and clean up columns
+
+AT_genes <-
+  AT_genes %>%
+  filter(biotype == "protein_coding_gene")
+
+AT_genes$chromosome <- gsub(pattern = "[Chr]", replacement = "", AT_genes$chromosome)
+
+AT_genes <-
+  AT_genes %>%
+  filter(chromosome %in% c(1,2,3,4,5))
+#getting rid of mitochondrial and plastid locations
+
+AT_genes <- makeGRangesFromDataFrame(AT_genes, keep.extra.columns = TRUE)
+```
+This step pulls the reference genome in which we will compare everything in this analysis to. The most updated copy of the genome is called TAIR10. Arabidopsis, despite being relatively small and considered to be one of the best plant model organisms, still has updates and improvements on where genes are located and other details. Therefore, this is the most updated I could find. The data wrangling includes filtering for only genes (not wanting details on exons, non-coding regions, mitochondrial DNA), cleaning up columns to separate words from numbers, removing plastid DNA, and finally making the genome into a GRange. This file format is used in larger genomic processing and is required for certain packages, like the overlapping function from a Bioconductor package used later.
+
+# Retrieving Sample sRNA clusters
+```{r, results = 'hide'}
+####sRNA counts####
+sRNAcounts_wild_1 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933516/suppl/GSM3933516_WT-1_counts.txt.gz")
+#txt file from the paper, copy link address of ftp download button and import from the online source
+
+sRNAcounts_wild_2 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933517/suppl/GSM3933517_WT-2_counts.txt.gz")
+
+sRNAcounts_wild_3 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933518/suppl/GSM3933518_WT-3_counts.txt.gz")
+
+sRNAcounts_wild_4 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933519/suppl/GSM3933519_WT-4_counts.txt.gz")
+
+sRNAcounts_memory_1 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933520/suppl/GSM3933520_memory_gen1-1_counts.txt.gz")
+
+sRNAcounts_memory_2 <- data.table::fread("https://ftp.ncbi.nlm.nih.gov/geo/samples/GSM3933nnn/GSM3933521/suppl/GSM3933521_memory_gen1-2_counts.txt.gz")
+```
+Here is where the plant sRNA sequencing data is pulled. All of these are from a paper from the [Mackenzie Lab](https://sites.psu.edu/mackenzielab/) at Penn State written by Yang et al. titled ["Segregation of an MSH1 RNAi transgene produces heritable non-genetic memory in association with methylome reprogramming"](https://www.nature.com/articles/s41467-020-16036-8). In this there are four wild type plants, the controls, and two memory plants. This experimental group is created by inducing a knock down of a certain gene that is responsible for genome stability, called MSH1. The knock down is conducted when MSH1 is suppressed by RNA interference through the use of a transgene, creating mutants. The mutation is not the factor of interest though, the line that is examined in this experiment is the memory group. The memory group are the first generation after the insertion of the transgene, that do not maintain the transgene in their sequence, instead they are considered 'transgene-null'. This paper sought to investigate how there were changes in the genome indicated by sRNA counts that are not directly attributed to a transgene-positive insertion still lingering from a parent. sRNA counts are of interest since these are important for the pathways that methylate certain genes. sRNA's, in a basic sense, flag down other mechanisms that will then methylate or demethylate a region of bases within a gene, therefore activating or deactivating these genes. The memory plants are intersting to study since they are indicators that there is an epigenetic system at play if there is significant difference in sRNA clusters (groups of sRNA's we can detect, different than the region of a gene) that overlap with certain genes.
+
+# Combining and Cleaning Sample Data
+```{r}
+sRNAcounts_comb <- merge(sRNAcounts_wild_1, sRNAcounts_wild_2, by = "Name")
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  dplyr::select(Name, start.x, end.x, "WT-1", "WT-2")
+
+sRNAcounts_comb <- merge(sRNAcounts_comb, sRNAcounts_wild_3, by = "Name")
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  dplyr::select(Name, start.x, end.x, "WT-1", "WT-2", "WT-3")
+
+sRNAcounts_comb <- merge(sRNAcounts_comb, sRNAcounts_wild_4, by = "Name")
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  dplyr::select(Name, start.x, end.x, "WT-1", "WT-2", "WT-3", "WT-4")
+
+sRNAcounts_comb <- merge(sRNAcounts_comb, sRNAcounts_memory_1, by = "Name")
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  dplyr::select(Name, "WT-1", "WT-2", "WT-3", "WT-4", "memory_gen1-1", start.x, end.x)
+
+sRNAcounts_comb <- merge(sRNAcounts_comb, sRNAcounts_memory_2, by = "Name")
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  dplyr::select(Name, "WT-1", "WT-2", "WT-3", "WT-4", "memory_gen1-1", "memory_gen1-2", seqnames, start.x, end.x)
+
+colnames(sRNAcounts_comb) <- c('Name', 'WT-1', 'WT-2', 'WT-3', 'WT-4', 'MEM-1', 'MEM-2', 'seqnames', 'start', 'end')
+
+rm("sRNAcounts_wild_1", "sRNAcounts_wild_2", "sRNAcounts_wild_3", "sRNAcounts_wild_4", "sRNAcounts_memory_1", "sRNAcounts_memory_2")
+
+```
+Merging all of the plants that were sequenced into a single usable dataframe.
+
+# Determining Clusters of Interest
+```{r}
+####determining clusters of interest
+#find average sRNA cluster for each of the treatments and mutate into a new column
+
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  mutate('WT_avg' = rowMeans(dplyr::select(sRNAcounts_comb, starts_with("WT")), na.rm = TRUE)) %>%
+  mutate('MEM_avg' = rowMeans(dplyr::select(sRNAcounts_comb, starts_with("MEM")), na.rm = TRUE))
+
+sRNAcounts_comb <-
+  sRNAcounts_comb %>%
+  mutate(foldchange = as.numeric(WT_avg/MEM_avg)) %>%
+  mutate(the_rank = rank(foldchange))
+
+sRNAcounts_higherWTexp <-
+  sRNAcounts_comb %>%
+  filter(foldchange > 4) %>%
+  dplyr::select(Name, start, end, seqnames, foldchange)
+
+sRNAcounts_higherMEMexp <-
+  sRNAcounts_comb %>%
+  filter(foldchange < 0.35) %>%
+  dplyr::select(Name, start, end, seqnames, foldchange)
+#thresholds are arbitrary
+```
+This step is where the first real computations happen and decisions for analysis are made. The average sRNA count is taken for each cluster in each experimental group and then change is explored using a fold change. This is how many times over the average count of sRNAs changes from the wild type plants to the control plants. I determined the threshold for significance to be over 4x and under 0.35x.
+
+# Figure 1: Difference in sRNA Count per Cluster
+```{r, results='hide'}
+sRNAcounts_comb_plot <- separate(sRNAcounts_comb, Name, c("Cluster", "Number"))
+sRNAcounts_comb_plot$Number <- as.numeric(sRNAcounts_comb_plot$Number)
+names(sRNAcounts_comb_plot)[names(sRNAcounts_comb_plot) == 'seqnames'] <- 'Chromosome'
+
+sRNAcounts_comb_plot <-
+  sRNAcounts_comb_plot %>%
+  mutate(difference_ofavg = WT_avg - MEM_avg)
+
+
+sRNAcounts_comb_plot %>%
+  ggplot(aes(x = Number, y= difference_ofavg)) +
+  geom_point(aes(color= Chromosome)) +
+  scale_y_continuous(name="sRNA Count Difference", labels = comma) +
+  xlab("Cluster") +
+  ggtitle("Difference in sRNA Count per Cluster") +
+  ylim(-180000, 150000) +
+  ylab("Difference in sRNA counts (WT - MEM)")
+```
+This plot shows the change in sRNA counts between wild type and memory plants. The figure shows that there are not that many cluster differences, indicating that there will be a small number of clusters and eventually a concentrated number of genes to explore. The color is broken down by chromosome that the clusters are located on. 
+
+
+# Figure 2: Significance of Fold Change Per Cluster
+```{r}
+sRNAcounts_comb_plot2 <- separate(sRNAcounts_comb, Name, c("Cluster", "Number"))
+sRNAcounts_comb_plot2$Number <- as.numeric(sRNAcounts_comb_plot2$Number)
+names(sRNAcounts_comb_plot2)[names(sRNAcounts_comb_plot2) == 'seqnames'] <- 'Chromosome'
+
+sRNAcounts_comb_plot2 <- 
+  sRNAcounts_comb_plot2 %>%
+  dplyr::select("Number", "Chromosome", "start", "end", "foldchange") %>%
+  filter(foldchange != "NaN")
+
+sRNAcounts_comb_plot2 <-
+  sRNAcounts_comb_plot2 %>%
+  mutate(significance = case_when(
+    foldchange < 0.35 ~ "MEM_signif",
+    foldchange > 4 ~ "WT_signif",
+    foldchange <= 4 | foldchange >= 0.35 ~ "insignificant"
+  ))
+
+sRNAcounts_comb_plot2 %>%
+  ggplot(aes(x = Chromosome, fill = significance)) + 
+  geom_bar() +
+  coord_flip() +
+  ylab("Number of Clusters") +
+  ggtitle("Significance of Fold Change per Cluster")
+```
+Figure 2 shows the relative amount of clusters that are deemed significant. Both overabundance in wild type and overabundance in memory are represented compared to insignificant. Insignificant changes make up the vast amount of clusters in each chromosome, once again supporting the notion that the further analysis will be concentrated on a few genes that differ.
+
+# Finding Overlaps in Experimental sRNA Clusters to Reference Arabidopsis Genome
+```{r}
+####make a GRange####
+sRNAcounts_higherWTexp_gr <- makeGRangesFromDataFrame(sRNAcounts_higherWTexp, keep.extra.columns = TRUE)
+
+Overlaps_WT_genes <- findOverlaps(sRNAcounts_higherWTexp_gr, AT_genes, ignore.strand = TRUE, maxgap = 0L)
+#RNAcount_gr is query, #gene is the subject
+#literature says 2kb away may still have power to influence
+#we are just looking at direct overlap
+
+Overlaps_WT_genes <-AT_genes[queryHits(Overlaps_WT_genes)]
+#this step picks each of the genes that the query hits are on, we need all the information of genes
+
+Overlaps_WT_genes <-unique(Overlaps_WT_genes)
+#just want the unique genes
+
+Overlap_WT_geneid <- Overlaps_WT_genes$gene_id
+
+###memory high exp###
+sRNAcounts_higherMEMexp_gr <- makeGRangesFromDataFrame(sRNAcounts_higherMEMexp, keep.extra.columns = TRUE)
+
+Overlaps_MEM_genes <- findOverlaps(sRNAcounts_higherMEMexp_gr, AT_genes, ignore.strand = TRUE, maxgap = 0L)
+#RNAcount_gr is query, #gene is the subject
+#literature says 2kb away may still have power to influence
+#we are just looking at direct overlap
+
+Overlaps_MEM_genes <-AT_genes[queryHits(Overlaps_MEM_genes)]
+#this step picks each of the genes that the query hits are on, we need all the information of genes
+
+Overlaps_MEM_genes <-unique(Overlaps_MEM_genes)
+#just want the unique genes
+
+Overlap_MEM_geneid <- Overlaps_MEM_genes$gene_id
+```
+This chunk is some base R and using GRanges and Bioconductor packages to determine overlaps between the cluters and the genes. I chose the max gap to be 0 so that the clusters have to have direct contact with a gene in order to count as an overlap. The unique genes for each experimental group are then put into their own vectors for further analysis.
+
+# Gene Descriptions and Names from Online Source
+```{r}
+####gene descriptions
+listDatasets(useMart(biomart="plants_mart",host="plants.ensembl.org"))
+#retrieves gene descriptions from an online database
+
+mart <- useDataset(dataset = "athaliana_eg_gene", 
+                   mart    = useMart("plants_mart",host = "plants.ensembl.org"))
+#specifies that we want arabidopsis from the list of plants
+
+head(listFilters(useDataset(dataset = "athaliana_eg_gene", 
+                            mart    = useMart("plants_mart",
+                                              host = "plants.ensembl.org"))), 100)
+#tons of information about the arabidopsis genome that we can choose from
+#visualizing data source
+
+resultTable_higherWTexp <- getBM(attributes = c("ensembl_gene_id", "external_gene_name",
+                                    "description", "name_1006", "go_id", "definition_1006", "namespace_1003"),
+                     filters = "ensembl_gene_id", values = Overlap_WT_geneid, mart = mart)
+
+
+resultTable_higherMEMexp <- getBM(attributes = c("ensembl_gene_id", "external_gene_name",
+                                                "description", "name_1006", "go_id", "definition_1006", "namespace_1003"),
+                                 filters = "ensembl_gene_id", values = Overlap_MEM_geneid, mart = mart)
+```
+Gene names are taken from the GRange of the overlapped genes and different characteristics are drawn out from an online source. The code provided shows different features that can be pulled from the database on ensembl using mart. The features selected were: 
+*gene code
+*external gene name
+*braod description
+*name of function
+*specific Gene Ontology ID
+*definition of specific function
+*category of function
+
+# BlackBox: Exporting GO Terms to get Parent Terms for Analysis
+```{r}
+overlapResult <- data.frame(matrix(ncol = 2, nrow = 210))
+colnames(overlapResult) <- c('WTgene_id', 'MEMgene_id')
+
+overlapResult$WTgene_id <- unique(resultTable_higherWTexp$external_gene_name)
+overlapResult[1:39 , 2] <- unique(resultTable_higherMEMexp$external_gene_name)
+
+overlapResult <-
+  overlapResult %>%
+  pivot_longer(cols = c("WTgene_id", "MEMgene_id"), names_to = "treatment", values_to = "gene_id") %>%
+  filter(gene_id != "NA")
+
+write.csv(overlapResult, file = "/Users/jackhoward/Desktop/significant_geneID.csv")
+```
+The GO terms from mart are helpful for each specific function, but meaningful analysis cannot be done on hundreds of GO terms with minimal overlap between the genes of interest. Therefore, the gene external names are exported to an online software that takes the gene names and backtracks to common GO parent terms. These are upstream, broader categories with more genes falling under their umbrella.
+
+# Getting Parent Terms
+```{r}
+princeton_results <- "https://go.princeton.edu/tmp/4720282//query_results.html"
+GOparent <- princeton_results %>%
+  read_html() %>%
+  html_nodes(css = "table") %>%
+  html_table(fill = TRUE)
+
+GOparent_terms <- GOparent[[7]]
+```
+The product of the online tool is an HTML file generated from the run. This is imported into R and isolated into its own dataframe.
+
+# Cleaning GO Dataframe
+```{r}
+colnames(GOparent_terms) <- c('GOterm', 'selected_genes','genome', 'pValue')
+GOparent_terms <- GOparent_terms[ , c(1:4)]
+
+GOparent_terms$selected_genes <- gsub("^.*,","", GOparent_terms$selected_genes)
+GOparent_terms$selected_genes <- gsub("%","", GOparent_terms$selected_genes)
+GOparent_terms$genome <- gsub("^.*,","", GOparent_terms$genome)
+GOparent_terms$genome <- gsub("%","", GOparent_terms$genome)
+
+GOparent_terms <-
+  GOparent_terms %>%
+  pivot_longer(cols = c(selected_genes, genome), names_to = "scale", values_to = "freq")
+
+GOparent_terms$freq <- as.numeric(GOparent_terms$freq)
+```
+The HTML file and subsequent dataframe is not tidy for numerical analysis, so it was cleaned using various transformation and reduction functions.
+
+# Figure 3: Frequency of Genes Per GO Term in Significant Genes vs Genome
+```{r}
+GOparent_terms$GOterm <- str_wrap(GOparent_terms$GOterm, width = 24)
+
+GOparent_terms %>%
+  ggplot(aes(x = GOterm, y = freq, fill = scale)) +
+  geom_bar(stat = 'identity', position = position_dodge()) +
+  theme(axis.text.x = element_text(angle = 55, hjust = 1), legend.title = element_blank()) +
+  ylab("Frequency of Genes (%)") +
+  xlab("Gene Ontology Parent Term") +
+  ggtitle("Frequency of Genes Per GO Term in Significant Genes vs Genome")
+```
+This figure compares the percent of the significant genes that correspond to a GO term compared to the percent of genes in the entire genome that correspond to the GO term. In this analysis, significant for memory or significance for wild type was not considered as we do not really care as to which way the change goes, what matters is that the introduction of and disappearance of a transgene caused a change in sRNA counts on these genes.  
